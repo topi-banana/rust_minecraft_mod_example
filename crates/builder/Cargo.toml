@@ -9,8 +9,10 @@ name = "builder"
 path = "src/main.rs"
 
 [dependencies]
-crustf     = { workspace = true }
-serde      = { workspace = true }
-serde_json = { workspace = true }
-anyhow     = { workspace = true }
-zip        = { version = "2", default-features = false, features = ["deflate"] }
+crustf         = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+anyhow         = { workspace = true }
+wasmparser     = { workspace = true }
+cargo_metadata = { workspace = true }
+zip            = { version = "2", default-features = false, features = ["deflate"] }

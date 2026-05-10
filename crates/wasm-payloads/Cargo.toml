@@ -1,9 +1,8 @@
 [package]
-name    = "wasm-payload"
+name    = "wasm-payloads"
 version = "0.1.0"
 edition.workspace      = true
 rust-version.workspace = true
 
-[[bin]]
-name = "wasm-payload"
-path = "src/main.rs"
+[dependencies]
+inject-macro = { workspace = true }

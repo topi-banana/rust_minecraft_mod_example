@@ -5,18 +5,21 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use crustf::{
     AccessFlags, Annotation, ArrayType, ClassFileBuilder, CodeBuilder, ElementValue, JarBuilder,
     MethodBuilder, Version,
 };
 use serde::Serialize;
 
-const CLASS_INTERNAL: &str = "com/example/mixin/HelloWasmMixin";
 const MIXIN_PACKAGE: &str = "com.example.mixin";
+const MIXIN_PACKAGE_INTERNAL: &str = "com/example/mixin";
 const MOD_ID: &str = "hello-wasm-mod";
-const WASM_JAR_ENTRY: &str = "assets/hello-wasm-mod/payload.wasm";
-const WASM_RESOURCE_PATH: &str = "/assets/hello-wasm-mod/payload.wasm";
+const WASMS_PACKAGE: &str = "wasm-payloads";
+
+const MIXIN_ANNOTATION: &str = "Lorg/spongepowered/asm/mixin/Mixin;";
+const INJECT_ANNOTATION: &str = "Lorg/spongepowered/asm/mixin/injection/Inject;";
+const AT_ANNOTATION: &str = "Lorg/spongepowered/asm/mixin/injection/At;";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,39 +51,62 @@ struct MixinInjectors {
     default_require: u32,
 }
 
+#[derive(Debug)]
+struct InjectMeta {
+    bin_stem: String,
+    fn_name: String,
+    target: String,
+    method: String,
+    at: String,
+}
+
+struct WasmPlan {
+    wasm_bytes: Vec<u8>,
+    jar_entry: String,
+    metas: Vec<InjectMeta>,
+}
+
 fn main() -> Result<()> {
-    let ws_root = workspace_root()?;
+    let metadata = cargo_metadata::MetadataCommand::new()
+        .exec()
+        .context("failed to invoke cargo metadata")?;
+    let ws_root: PathBuf = metadata.workspace_root.clone().into();
     let out_dir = ws_root.join("out");
     let vendor = ws_root.join("vendor");
 
-    println!("→ cargo build -p wasm-payload --release --target wasm32-unknown-unknown");
-    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let status = Command::new(&cargo)
-        .args([
-            "build",
-            "-p",
-            "wasm-payload",
-            "--release",
-            "--target",
-            "wasm32-unknown-unknown",
-        ])
-        .current_dir(&ws_root)
-        .status()
-        .context("failed to spawn cargo")?;
-    if !status.success() {
-        bail!("wasm-payload build failed (exit {status})");
+    run_cargo_build(&ws_root)?;
+
+    let bins = discover_wasm_bins(&metadata, &ws_root)?;
+    println!("→ discovered {} wasm bin(s):", bins.len());
+    let mut plans: Vec<WasmPlan> = Vec::new();
+    for (stem, path) in &bins {
+        let wasm_bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        let metas = parse_inject_meta(&wasm_bytes, stem)
+            .with_context(|| format!("parsing inject_meta from {}", path.display()))?;
+        println!(
+            "    {stem}.wasm ({} bytes, {} inject record(s))",
+            wasm_bytes.len(),
+            metas.len()
+        );
+        for m in &metas {
+            println!(
+                "      fn={} target={} method={} at={}",
+                m.fn_name, m.target, m.method, m.at
+            );
+        }
+        plans.push(WasmPlan {
+            wasm_bytes,
+            jar_entry: format!("assets/{MOD_ID}/{stem}.wasm"),
+            metas,
+        });
+    }
+    let total_records: usize = plans.iter().map(|p| p.metas.len()).sum();
+    if total_records == 0 {
+        bail!("no #[inject] annotations found in any wasm bin — nothing to generate");
     }
 
-    let wasm_path = ws_root.join("target/wasm32-unknown-unknown/release/wasm-payload.wasm");
-    let wasm_bytes =
-        fs::read(&wasm_path).with_context(|| format!("reading {}", wasm_path.display()))?;
-    println!("→ wasm payload: {} ({} bytes)", wasm_path.display(), wasm_bytes.len());
-
     let jars = find_all_wasmer_jnis(&vendor)?;
-    println!(
-        "→ vendored wasmer-jni jars ({} platform(s)):",
-        jars.len()
-    );
+    println!("→ vendored wasmer-jni jars ({} platform(s)):", jars.len());
     for (platform, path) in &jars {
         println!("    {}: {}", platform, path.display());
     }
@@ -106,16 +132,35 @@ fn main() -> Result<()> {
         );
     }
 
-    let class_bytes = build_mixin_class()?;
+    let mut class_files: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut all_class_simples: Vec<String> = Vec::new();
+    for plan in &plans {
+        for meta in &plan.metas {
+            let (internal, class_bytes) = build_mixin_class_for(meta)?;
+            let simple = internal
+                .rsplit('/')
+                .next()
+                .expect("class_internal contains /")
+                .to_string();
+            class_files.push((format!("{internal}.class"), class_bytes));
+            all_class_simples.push(simple);
+        }
+    }
+    println!("→ generated {} Mixin class(es)", class_files.len());
+
     let fabric_json = serde_json::to_string_pretty(&fabric_mod_descriptor())?;
-    let mixin_json = serde_json::to_string_pretty(&mixin_config())?;
+    let mixin_json = serde_json::to_string_pretty(&mixin_config(&all_class_simples))?;
 
     fs::create_dir_all(&out_dir)?;
     let mut builder = JarBuilder::new()
         .file("fabric.mod.json", fabric_json)
-        .file(format!("{MOD_ID}.mixins.json"), mixin_json)
-        .file(format!("{CLASS_INTERNAL}.class"), class_bytes)
-        .file(WASM_JAR_ENTRY, wasm_bytes);
+        .file(format!("{MOD_ID}.mixins.json"), mixin_json);
+    for (entry, bytes) in class_files {
+        builder = builder.file(entry, bytes);
+    }
+    for plan in plans {
+        builder = builder.file(plan.jar_entry, plan.wasm_bytes);
+    }
     // Flatten wasmer-jni into the mod jar root (Fabric's JiJ would require an
     // inner fabric.mod.json — wasmer-jni is a plain library, so JiJ won't
     // expose its classes). KnotClassLoader sees `org/wasmer/*` directly.
@@ -134,13 +179,107 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn workspace_root() -> Result<PathBuf> {
-    let manifest = env!("CARGO_MANIFEST_DIR");
-    Path::new(manifest)
-        .ancestors()
-        .nth(2)
-        .map(Path::to_path_buf)
-        .ok_or_else(|| anyhow!("cannot locate workspace root from {manifest}"))
+fn run_cargo_build(ws_root: &Path) -> Result<()> {
+    println!("→ cargo build -p {WASMS_PACKAGE} --release --target wasm32-unknown-unknown");
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let status = Command::new(&cargo)
+        .args([
+            "build",
+            "-p",
+            WASMS_PACKAGE,
+            "--release",
+            "--target",
+            "wasm32-unknown-unknown",
+        ])
+        .current_dir(ws_root)
+        .status()
+        .context("failed to spawn cargo")?;
+    if !status.success() {
+        bail!("{WASMS_PACKAGE} build failed (exit {status})");
+    }
+    Ok(())
+}
+
+fn discover_wasm_bins(
+    metadata: &cargo_metadata::Metadata,
+    ws_root: &Path,
+) -> Result<Vec<(String, PathBuf)>> {
+    use cargo_metadata::TargetKind;
+    let pkg = metadata
+        .workspace_packages()
+        .into_iter()
+        .find(|p| p.name.as_str() == WASMS_PACKAGE)
+        .ok_or_else(|| anyhow!("`{WASMS_PACKAGE}` package not found in workspace"))?;
+    let release_dir = ws_root.join("target/wasm32-unknown-unknown/release");
+    let mut out = Vec::new();
+    for t in &pkg.targets {
+        if t.kind.iter().any(|k| matches!(k, TargetKind::Bin)) {
+            let stem = t.name.clone();
+            let path = release_dir.join(format!("{stem}.wasm"));
+            if !path.exists() {
+                bail!(
+                    "expected {} after cargo build, but it does not exist",
+                    path.display()
+                );
+            }
+            out.push((stem, path));
+        }
+    }
+    if out.is_empty() {
+        bail!("no [[bin]] targets in `{WASMS_PACKAGE}`");
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
+fn parse_inject_meta(wasm_bytes: &[u8], bin_stem: &str) -> Result<Vec<InjectMeta>> {
+    use wasmparser::{Parser, Payload};
+    let mut all_data = Vec::new();
+    for payload in Parser::new(0).parse_all(wasm_bytes) {
+        if let Payload::CustomSection(reader) = payload?
+            && reader.name() == "inject_meta"
+        {
+            all_data.extend_from_slice(reader.data());
+        }
+    }
+    let mut records = Vec::new();
+    for rec in all_data.split(|&b| b == 0x1e) {
+        if rec.is_empty() {
+            continue;
+        }
+        let parts: Vec<&[u8]> = rec.split(|&b| b == 0x1f).collect();
+        if parts.len() != 4 {
+            bail!(
+                "malformed inject_meta record: expected 4 fields, got {}",
+                parts.len()
+            );
+        }
+        let field = |idx: usize, name: &str| -> Result<String> {
+            std::str::from_utf8(parts[idx])
+                .with_context(|| format!("inject_meta {name} not UTF-8"))
+                .map(str::to_string)
+        };
+        records.push(InjectMeta {
+            bin_stem: bin_stem.to_string(),
+            fn_name: field(0, "fn_name")?,
+            target: field(1, "target")?,
+            method: field(2, "method")?,
+            at: field(3, "at")?,
+        });
+    }
+    Ok(records)
+}
+
+fn sanitize_stem(s: &str) -> String {
+    s.replace('-', "_")
+}
+
+fn class_internal_for(meta: &InjectMeta) -> String {
+    format!(
+        "{MIXIN_PACKAGE_INTERNAL}/{}_{}_Mixin",
+        sanitize_stem(&meta.bin_stem),
+        meta.fn_name
+    )
 }
 
 fn find_all_wasmer_jnis(vendor: &Path) -> Result<Vec<(String, PathBuf)>> {
@@ -200,8 +339,8 @@ fn extract_wasmer_jni_entries(jars: &[(String, PathBuf)]) -> Result<BTreeMap<Str
 
     let mut all_files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     for (_platform, jar_path) in jars {
-        let file = fs::File::open(jar_path)
-            .with_context(|| format!("opening {}", jar_path.display()))?;
+        let file =
+            fs::File::open(jar_path).with_context(|| format!("opening {}", jar_path.display()))?;
         let mut archive = zip::ZipArchive::new(file)
             .with_context(|| format!("reading {} as zip", jar_path.display()))?;
         for i in 0..archive.len() {
@@ -229,8 +368,7 @@ fn fabric_mod_descriptor() -> FabricMod {
         id: MOD_ID.into(),
         version: "0.1.0".into(),
         name: "Hello WASM Mod".into(),
-        description: "Calls a wasm payload via wasmer-java to print a string at server start."
-            .into(),
+        description: "Calls wasm payloads via wasmer-java to print strings at server start.".into(),
         environment: "*".into(),
         license: "MIT".into(),
         mixins: vec![format!("{MOD_ID}.mixins.json")],
@@ -241,27 +379,24 @@ fn fabric_mod_descriptor() -> FabricMod {
     }
 }
 
-fn mixin_config() -> MixinConfig {
+fn mixin_config(class_simples: &[String]) -> MixinConfig {
     MixinConfig {
         required: true,
         package: MIXIN_PACKAGE.into(),
         compatibility_level: "JAVA_8".into(),
-        mixins: vec!["HelloWasmMixin".into()],
+        mixins: class_simples.to_vec(),
         injectors: MixinInjectors { default_require: 1 },
     }
 }
 
-fn build_mixin_class() -> crustf::Result<Vec<u8>> {
-    ClassFileBuilder::new(CLASS_INTERNAL)
+fn build_mixin_class_for(meta: &InjectMeta) -> crustf::Result<(String, Vec<u8>)> {
+    let class_internal = class_internal_for(meta);
+    let bytes = ClassFileBuilder::new(&class_internal)
         .version(Version::new(52, 0))
-        .annotation(
-            Annotation::invisible("Lorg/spongepowered/asm/mixin/Mixin;").element(
-                "value",
-                ElementValue::Array(vec![ElementValue::Class(
-                    "Lnet/minecraft/server/MinecraftServer;".into(),
-                )]),
-            ),
-        )
+        .annotation(Annotation::invisible(MIXIN_ANNOTATION).element(
+            "value",
+            ElementValue::Array(vec![ElementValue::Class(meta.target.clone())]),
+        ))
         .method(
             MethodBuilder::new("<init>", "()V")
                 .access_flags(AccessFlags::PUBLIC)
@@ -280,31 +415,31 @@ fn build_mixin_class() -> crustf::Result<Vec<u8>> {
             .access_flags(AccessFlags::PRIVATE)
             .exception("java/io/IOException")
             .annotation(
-                Annotation::visible("Lorg/spongepowered/asm/mixin/injection/Inject;")
-                    .element("method", ElementValue::String("runServer".into()))
+                Annotation::visible(INJECT_ANNOTATION)
+                    .element("method", ElementValue::String(meta.method.clone()))
                     .element(
                         "at",
                         ElementValue::Array(vec![ElementValue::from(
-                            Annotation::visible("Lorg/spongepowered/asm/mixin/injection/At;")
-                                .element("value", ElementValue::String("HEAD".into())),
+                            Annotation::visible(AT_ANNOTATION)
+                                .element("value", ElementValue::String(meta.at.clone())),
                         )]),
                     ),
             )
-            .code(emit_on_run),
+            .code(|c| emit_on_run(c, meta, &class_internal)),
         )
-        .build()
+        .build()?;
+    Ok((class_internal, bytes))
 }
 
-fn emit_on_run(c: &mut CodeBuilder) {
-    // Peak stack depth in this method is 5 slots, reached at `dup2; bipush 32`
-    // during the long-to-(int,int) split in Step 4. Set 6 for headroom.
+fn emit_on_run(c: &mut CodeBuilder, meta: &InjectMeta, class_internal: &str) {
+    let resource_path = format!("/assets/{MOD_ID}/{}.wasm", meta.bin_stem);
+    // Peak stack depth is 5 slots, reached at `dup2; bipush 32` during the
+    // long-to-(int,int) split in Step 4. Set 6 for headroom.
     c.max_stack(6);
 
-    // Step 1: byte[] wasmBytes = HelloWasmMixin.class
-    //                                .getResourceAsStream("/assets/.../payload.wasm")
-    //                                .readAllBytes();
-    c.ldc_class(CLASS_INTERNAL)
-        .ldc_string(WASM_RESOURCE_PATH)
+    // Step 1: byte[] wasmBytes = ThisClass.class.getResourceAsStream(...).readAllBytes();
+    c.ldc_class(class_internal)
+        .ldc_string(resource_path)
         .invokevirtual(
             "java/lang/Class",
             "getResourceAsStream",
@@ -326,12 +461,11 @@ fn emit_on_run(c: &mut CodeBuilder) {
         .astore(4);
 
     // Step 4:
-    //   Function greet = exports.getFunction("greet");
-    //   long packed = ((Long) greet.apply(new Object[0])[0]).longValue();
-    //   int ptr = (int)(packed >>> 32);
-    //   int len = (int) packed;
+    //   Function f = exports.getFunction(<fn_name>);
+    //   long packed = ((Long) f.apply(new Object[0])[0]).longValue();
+    //   int ptr = (int)(packed >>> 32); int len = (int) packed;
     c.aload(4)
-        .ldc_string("greet")
+        .ldc_string(&meta.fn_name)
         .invokevirtual(
             "org/wasmer/Exports",
             "getFunction",
@@ -356,11 +490,7 @@ fn emit_on_run(c: &mut CodeBuilder) {
         .l2i()
         .istore(8);
 
-    // Step 5:
-    //   ByteBuffer buf = exports.getMemory("memory").buffer();
-    //   buf.position(ptr);
-    //   byte[] outBytes = new byte[len];
-    //   buf.get(outBytes);
+    // Step 5: byte[] outBytes = new byte[len]; exports.getMemory("memory").buffer().position(ptr).get(outBytes);
     c.aload(4)
         .ldc_string("memory")
         .invokevirtual(
@@ -375,16 +505,11 @@ fn emit_on_run(c: &mut CodeBuilder) {
         .iload(8)
         .newarray(ArrayType::Byte)
         .dup_x1()
-        .invokevirtual(
-            "java/nio/ByteBuffer",
-            "get",
-            "([B)Ljava/nio/ByteBuffer;",
-        )
+        .invokevirtual("java/nio/ByteBuffer", "get", "([B)Ljava/nio/ByteBuffer;")
         .pop()
         .astore(9);
 
-    // Step 6:
-    //   System.out.println(new String(outBytes, StandardCharsets.UTF_8));
+    // Step 6: System.out.println(new String(outBytes, StandardCharsets.UTF_8));
     c.new_class("java/lang/String")
         .dup()
         .aload(9)
