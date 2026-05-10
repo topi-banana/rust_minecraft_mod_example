@@ -33,18 +33,18 @@ struct FabricMod {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct MixinConfig {
     required: bool,
     package: String,
-    #[serde(rename = "compatibilityLevel")]
     compatibility_level: String,
     mixins: Vec<String>,
     injectors: MixinInjectors,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct MixinInjectors {
-    #[serde(rename = "defaultRequire")]
     default_require: u32,
 }
 
@@ -187,16 +187,17 @@ fn find_all_wasmer_jnis(vendor: &Path) -> Result<Vec<(String, PathBuf)>> {
     Ok(found)
 }
 
-/// Extract every entry (except `META-INF/MANIFEST.MF`) from each input jar,
-/// with first-write-wins on duplicates. The vendored jar's filename does NOT
-/// reliably encode the resource path's platform string — wasmer-java's runtime
-/// loader uses `{os.name normalized}-{os.arch}` (e.g. `windows-amd64`,
-/// `darwin-x86_64`, `linux-amd64`) regardless of whether the file is shipped
-/// as `wasmer-jni-amd64-windows-*.jar` or `wasmer-jni-windows-amd64-*.jar`. So
-/// we just take the union of all entries: native libs across jars sit at
-/// distinct paths and don't collide; class files are byte-identical so the
-/// first jar's copies are canonical.
+/// Take the union of every entry across input jars (skipping
+/// `META-INF/MANIFEST.MF`), first-write-wins on duplicates.
+///
+/// We deliberately do NOT filter by platform. wasmer-java's runtime loader
+/// builds resource paths from `{os.name normalized}-{os.arch}` (e.g.
+/// `windows-amd64`, `darwin-x86_64`), while jar filenames sometimes invert the
+/// order (`amd64-windows`). Filtering by a filename-derived platform silently
+/// drops the actual native lib.
 fn extract_wasmer_jni_entries(jars: &[(String, PathBuf)]) -> Result<BTreeMap<String, Vec<u8>>> {
+    use std::collections::btree_map::Entry;
+
     let mut all_files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     for (_platform, jar_path) in jars {
         let file = fs::File::open(jar_path)
@@ -212,12 +213,11 @@ fn extract_wasmer_jni_entries(jars: &[(String, PathBuf)]) -> Result<BTreeMap<Str
             if name == "META-INF/MANIFEST.MF" {
                 continue;
             }
-            if all_files.contains_key(&name) {
-                continue;
+            if let Entry::Vacant(slot) = all_files.entry(name) {
+                let mut bytes = Vec::with_capacity(entry.size() as usize);
+                entry.read_to_end(&mut bytes)?;
+                slot.insert(bytes);
             }
-            let mut bytes = Vec::with_capacity(entry.size() as usize);
-            entry.read_to_end(&mut bytes)?;
-            all_files.insert(name, bytes);
         }
     }
     Ok(all_files)
