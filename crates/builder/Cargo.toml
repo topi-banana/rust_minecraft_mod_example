@@ -1,7 +1,7 @@
 [package]
-name    = "builder"
+name = "builder"
 version = "0.1.0"
-edition.workspace      = true
+edition.workspace = true
 rust-version.workspace = true
 
 [[bin]]
@@ -9,10 +9,10 @@ name = "builder"
 path = "src/main.rs"
 
 [dependencies]
-crustf         = { workspace = true }
-serde          = { workspace = true }
-serde_json     = { workspace = true }
-anyhow         = { workspace = true }
-wasmparser     = { workspace = true }
+crustf = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+wasmparser = { workspace = true }
 cargo_metadata = { workspace = true }
-zip            = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
