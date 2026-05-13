@@ -80,6 +80,16 @@ impl MixinClass for MinecraftServerMixin {
                 native_name: "cancel_demo",
                 code: |mm, owner, c| emit_call_native(owner, c, mm.native_name, mm.target_args),
             },
+            MixinMethod {
+                name: "onTickServer",
+                target_method: "tickServer",
+                target_args: &[JavaType::Object("java/util/function/BooleanSupplier")],
+                at: MixinAt::Head,
+                cancellable: false,
+                exceptions: &[],
+                native_name: "on_tick",
+                code: |mm, owner, c| emit_call_native(owner, c, mm.native_name, mm.target_args),
+            },
         ]
     }
 }
