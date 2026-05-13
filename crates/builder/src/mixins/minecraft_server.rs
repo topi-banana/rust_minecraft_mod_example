@@ -1,39 +1,9 @@
 use crustf::CodeBuilder;
 
-use super::{MixinClass, MixinMethod, NativeMethod};
+use super::{MixinAt, MixinClass, MixinMethod, NativeMethod};
 use crate::{NATIVE_LOADER_INTERNAL, NATIVE_PAYLOADS_OWNER};
 
 pub struct MinecraftServerMixin;
-
-const NATIVES: &[NativeMethod] = &[
-    NativeMethod {
-        name: "hello",
-        descriptor: "()Ljava/lang/String;",
-    },
-    NativeMethod {
-        name: "goodbye",
-        descriptor: "()Ljava/lang/String;",
-    },
-];
-
-const METHODS: &[MixinMethod] = &[
-    MixinMethod {
-        name: "onRun",
-        descriptor: "(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V",
-        target_method: "runServer",
-        at: "HEAD",
-        exceptions: &["java/io/IOException"],
-        code: emit_on_run,
-    },
-    MixinMethod {
-        name: "onRunReturn",
-        descriptor: "(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V",
-        target_method: "runServer",
-        at: "RETURN",
-        exceptions: &["java/io/IOException"],
-        code: emit_on_run_return,
-    },
-];
 
 fn emit_print_via_native(owner: &dyn MixinClass, c: &mut CodeBuilder, native_fn: &str) {
     c.max_stack(2);
@@ -69,9 +39,35 @@ impl MixinClass for MinecraftServerMixin {
         "minecraft_server"
     }
     fn native_methods(&self) -> &'static [NativeMethod] {
-        NATIVES
+        &[
+            NativeMethod {
+                name: "hello",
+                descriptor: "()Ljava/lang/String;",
+            },
+            NativeMethod {
+                name: "goodbye",
+                descriptor: "()Ljava/lang/String;",
+            },
+        ]
     }
     fn methods(&self) -> &'static [MixinMethod] {
-        METHODS
+        &[
+            MixinMethod {
+                name: "onRun",
+                descriptor: "(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V",
+                target_method: "runServer",
+                at: MixinAt::Head,
+                exceptions: &["java/io/IOException"],
+                code: emit_on_run,
+            },
+            MixinMethod {
+                name: "onRunReturn",
+                descriptor: "(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V",
+                target_method: "runServer",
+                at: MixinAt::Return,
+                exceptions: &["java/io/IOException"],
+                code: emit_on_run_return,
+            },
+        ]
     }
 }

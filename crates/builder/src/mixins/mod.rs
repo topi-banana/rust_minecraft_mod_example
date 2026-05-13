@@ -10,12 +10,27 @@ pub struct NativeMethod {
     pub descriptor: &'static str,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum MixinAt {
+    Head,
+    Return,
+}
+
+impl std::fmt::Display for MixinAt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MixinAt::Head => write!(f, "HEAD"),
+            MixinAt::Return => write!(f, "RETURN"),
+        }
+    }
+}
+
 /// 生成 Mixin クラス側の 1 個の @Inject ハンドラ method。
 pub struct MixinMethod {
     pub name: &'static str,
     pub descriptor: &'static str,
     pub target_method: &'static str,
-    pub at: &'static str,
+    pub at: MixinAt,
     pub exceptions: &'static [&'static str],
     pub code: fn(&dyn MixinClass, &mut CodeBuilder),
 }
