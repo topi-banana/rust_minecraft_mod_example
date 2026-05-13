@@ -85,7 +85,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p native-payloads --release --examples
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: native-${{ matrix.platform }}
           path: |
@@ -116,7 +116,7 @@ jobs:
         env:
           NATIVE_LIB_DIRS: >-
             linux-x86_64=staging/linux-x86_64,linux-aarch64=staging/linux-aarch64,windows-x86_64=staging/windows-x86_64,windows-aarch64=staging/windows-aarch64,macos-x86_64=staging/macos-x86_64,macos-aarch64=staging/macos-aarch64
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mod-jar
           path: out/*.jar
