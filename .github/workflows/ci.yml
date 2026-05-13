@@ -73,22 +73,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest,    platform: linux-x86_64,    lib: libnative_payloads.so }
-          - { os: ubuntu-22.04-arm, platform: linux-aarch64,   lib: libnative_payloads.so }
-          - { os: windows-latest,   platform: windows-x86_64,  lib: native_payloads.dll }
-          - { os: windows-11-arm,   platform: windows-aarch64, lib: native_payloads.dll }
-          - { os: macos-15-intel,   platform: macos-x86_64,    lib: libnative_payloads.dylib }
-          - { os: macos-latest,     platform: macos-aarch64,   lib: libnative_payloads.dylib }
+          - { os: ubuntu-latest,    platform: linux-x86_64,    ext: so    }
+          - { os: ubuntu-22.04-arm, platform: linux-aarch64,   ext: so    }
+          - { os: windows-latest,   platform: windows-x86_64,  ext: dll   }
+          - { os: windows-11-arm,   platform: windows-aarch64, ext: dll   }
+          - { os: macos-15-intel,   platform: macos-x86_64,    ext: dylib }
+          - { os: macos-latest,     platform: macos-aarch64,   ext: dylib }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build -p native-payloads --release
+      - run: cargo build -p native-payloads --release --examples
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.platform }}
-          path: target/release/${{ matrix.lib }}
+          path: |
+            target/release/examples/*.${{ matrix.ext }}
+            !target/release/examples/*-*.${{ matrix.ext }}
           if-no-files-found: error
 
   package:
