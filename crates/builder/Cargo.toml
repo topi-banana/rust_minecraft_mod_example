@@ -13,6 +13,6 @@ crustf = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
-wasmparser = { workspace = true }
+object = { workspace = true }
 cargo_metadata = { workspace = true }
 zip = { version = "8", default-features = false, features = ["deflate"] }
