@@ -5,27 +5,15 @@ use crate::{NATIVE_LOADER_INTERNAL, NATIVE_PAYLOADS_OWNER};
 
 pub struct MinecraftServerMixin;
 
-fn emit_print_via_native(owner: &dyn MixinClass, c: &mut CodeBuilder, native_fn: &str) {
-    c.max_stack(2);
+fn emit_call_native(owner: &dyn MixinClass, c: &mut CodeBuilder, native_fn: &str) {
+    c.max_stack(1);
     c.invokestatic(
         NATIVE_LOADER_INTERNAL,
         &format!("ensure_{}", owner.native_lib_name()),
         "()V",
     )
-    .invokestatic(NATIVE_PAYLOADS_OWNER, native_fn, "()Ljava/lang/String;")
-    .astore(2)
-    .getstatic("java/lang/System", "out", "Ljava/io/PrintStream;")
-    .aload(2)
-    .invokevirtual("java/io/PrintStream", "println", "(Ljava/lang/String;)V")
+    .invokestatic(NATIVE_PAYLOADS_OWNER, native_fn, "()V")
     .return_void();
-}
-
-fn emit_on_run(owner: &dyn MixinClass, c: &mut CodeBuilder) {
-    emit_print_via_native(owner, c, "hello");
-}
-
-fn emit_on_run_return(owner: &dyn MixinClass, c: &mut CodeBuilder) {
-    emit_print_via_native(owner, c, "goodbye");
 }
 
 impl MixinClass for MinecraftServerMixin {
@@ -42,11 +30,11 @@ impl MixinClass for MinecraftServerMixin {
         &[
             NativeMethod {
                 name: "hello",
-                descriptor: "()Ljava/lang/String;",
+                descriptor: "()V",
             },
             NativeMethod {
                 name: "goodbye",
-                descriptor: "()Ljava/lang/String;",
+                descriptor: "()V",
             },
         ]
     }
@@ -58,7 +46,7 @@ impl MixinClass for MinecraftServerMixin {
                 target_method: "runServer",
                 at: MixinAt::Head,
                 exceptions: &["java/io/IOException"],
-                code: emit_on_run,
+                code: |owner, c| emit_call_native(owner, c, "hello"),
             },
             MixinMethod {
                 name: "onRunReturn",
@@ -66,7 +54,7 @@ impl MixinClass for MinecraftServerMixin {
                 target_method: "runServer",
                 at: MixinAt::Return,
                 exceptions: &["java/io/IOException"],
-                code: emit_on_run_return,
+                code: |owner, c| emit_call_native(owner, c, "goodbye"),
             },
         ]
     }

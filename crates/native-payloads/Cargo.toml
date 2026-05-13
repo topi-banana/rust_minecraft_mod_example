@@ -14,4 +14,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 inject-macro = { workspace = true }
+api = { workspace = true }
 jni = { workspace = true }

@@ -1,9 +1,9 @@
 #[inject_macro::inject]
-fn hello() -> &'static str {
-    "Hello from native!"
+fn hello() {
+    api::println("Hello from native!");
 }
 
 #[inject_macro::inject]
-fn goodbye() -> &'static str {
-    "Goodbye from native!"
+fn goodbye() {
+    api::println("Goodbye from native!");
 }
