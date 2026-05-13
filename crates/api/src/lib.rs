@@ -2,10 +2,36 @@ use std::cell::Cell;
 use std::fmt::Display;
 
 use jni::JNIEnv;
-use jni::objects::JValue;
+use jni::objects::{JObject, JValue};
 
 pub use jni::errors::Error as JniError;
 pub type Result<T = ()> = std::result::Result<T, JniError>;
+
+/// Mixin `@Inject` ハンドラに渡される `CallbackInfo` の Rust ラッパー。
+/// `#[inject_macro::inject]` が生成する JNI wrapper の第 3 引数 (jobject) を
+/// この構造体で包んでユーザー関数に渡す。
+pub struct CallbackInfo<'local> {
+    inner: JObject<'local>,
+}
+
+impl<'local> CallbackInfo<'local> {
+    /// # Safety
+    /// `inner` は JNI 関数呼び出しのスコープ内でのみ valid な local ref。
+    /// 通常は inject-macro が生成するコードからのみ呼ばれる。
+    pub unsafe fn from_jobject(inner: JObject<'local>) -> Self {
+        CallbackInfo { inner }
+    }
+
+    /// `CallbackInfo.cancel()` を呼ぶ。対応する `@Inject` が `cancellable = true`
+    /// でない場合、Java 側が `IllegalStateException` を投げて
+    /// `JniError::JavaException` で伝搬する。
+    pub fn cancel(&self) -> Result<()> {
+        with_env(|env| {
+            env.call_method(&self.inner, "cancel", "()V", &[])?;
+            Ok(())
+        })
+    }
+}
 
 thread_local! {
     static CURRENT_ENV: Cell<*mut jni::sys::JNIEnv> = const { Cell::new(std::ptr::null_mut()) };

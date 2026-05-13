@@ -296,19 +296,20 @@ fn build_mixin_class_for(m: &dyn MixinClass) -> crustf::Result<(String, Vec<u8>)
                 }),
         );
     for mm in m.methods() {
+        let at_anno = Annotation::visible(AT_ANNOTATION)
+            .element("value", ElementValue::String(mm.at.to_string()));
+        let mut inject_anno = Annotation::visible(INJECT_ANNOTATION)
+            .element("method", ElementValue::String(mm.target_method.to_string()))
+            .element(
+                "at",
+                ElementValue::Array(vec![ElementValue::from(at_anno)]),
+            );
+        if mm.cancellable {
+            inject_anno = inject_anno.element("cancellable", ElementValue::Boolean(true));
+        }
         let mut mb = MethodBuilder::new(mm.name, mm.descriptor)
             .access_flags(AccessFlags::PRIVATE)
-            .annotation(
-                Annotation::visible(INJECT_ANNOTATION)
-                    .element("method", ElementValue::String(mm.target_method.to_string()))
-                    .element(
-                        "at",
-                        ElementValue::Array(vec![ElementValue::from(
-                            Annotation::visible(AT_ANNOTATION)
-                                .element("value", ElementValue::String(mm.at.to_string())),
-                        )]),
-                    ),
-            );
+            .annotation(inject_anno);
         for ex in mm.exceptions {
             mb = mb.exception(*ex);
         }

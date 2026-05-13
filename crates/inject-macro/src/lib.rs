@@ -45,21 +45,30 @@ pub fn inject(args: TokenStream, input: TokenStream) -> TokenStream {
     let jni_ident = format_ident!("Java_{}_{}", JNI_NATIVE_OWNER, method_escaped);
 
     let block = &func.block;
+    let inputs = &func.sig.inputs;
+    let has_ci_param = !inputs.is_empty();
+
+    let inner_call = if has_ci_param {
+        quote! { #inner_ident(unsafe { ::api::CallbackInfo::from_jobject(__ci) }) }
+    } else {
+        quote! { #inner_ident() }
+    };
 
     quote! {
         #[inline]
-        fn #inner_ident() #block
+        fn #inner_ident(#inputs) #block
 
         #[unsafe(no_mangle)]
         pub extern "system" fn #jni_ident(
             env: ::jni::JNIEnv,
             _cls: ::jni::objects::JClass,
+            __ci: ::jni::objects::JObject,
         ) {
             let mut env = env;
             // SAFETY: `env` はこの JNI 関数呼び出しの間だけ有効で、guard と
             // 同じスコープにあるので、guard より長生きしない。
             let _guard = unsafe { ::api::EnvGuard::enter(&mut env) };
-            #inner_ident();
+            #inner_call;
         }
     }
     .into()

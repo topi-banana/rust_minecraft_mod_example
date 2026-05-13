@@ -31,6 +31,7 @@ pub struct MixinMethod {
     pub descriptor: &'static str,
     pub target_method: &'static str,
     pub at: MixinAt,
+    pub cancellable: bool,
     pub exceptions: &'static [&'static str],
     pub code: fn(&dyn MixinClass, &mut CodeBuilder),
 }
