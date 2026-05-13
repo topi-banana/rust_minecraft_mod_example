@@ -4,6 +4,9 @@ use std::fmt::Display;
 use jni::JNIEnv;
 use jni::objects::JValue;
 
+pub use jni::errors::Error as JniError;
+pub type Result<T = ()> = std::result::Result<T, JniError>;
+
 thread_local! {
     static CURRENT_ENV: Cell<*mut jni::sys::JNIEnv> = const { Cell::new(std::ptr::null_mut()) };
 }
@@ -44,21 +47,19 @@ fn with_env<R>(f: impl FnOnce(&mut JNIEnv) -> R) -> R {
 }
 
 /// `System.out.println(value.to_string())` を JNI 経由で呼ぶ。
-pub fn println<T: Display>(value: T) {
+pub fn println<T: Display>(value: T) -> Result<()> {
     let s = value.to_string();
-    with_env(|env| {
-        let jstr = env.new_string(&s).expect("new_string");
-        let system_cls = env.find_class("java/lang/System").expect("find System");
-        let out = env
-            .get_static_field(&system_cls, "out", "Ljava/io/PrintStream;")
-            .expect("System.out");
-        let out_obj = out.l().expect("PrintStream object");
+    with_env(|env| -> Result<()> {
+        let jstr = env.new_string(&s)?;
+        let system_cls = env.find_class("java/lang/System")?;
+        let out = env.get_static_field(&system_cls, "out", "Ljava/io/PrintStream;")?;
+        let out_obj = out.l()?;
         env.call_method(
             &out_obj,
             "println",
             "(Ljava/lang/String;)V",
             &[JValue::from(&jstr)],
-        )
-        .expect("println");
-    });
+        )?;
+        Ok(())
+    })
 }
