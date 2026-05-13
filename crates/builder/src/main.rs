@@ -300,10 +300,7 @@ fn build_mixin_class_for(m: &dyn MixinClass) -> crustf::Result<(String, Vec<u8>)
             .element("value", ElementValue::String(mm.at.to_string()));
         let mut inject_anno = Annotation::visible(INJECT_ANNOTATION)
             .element("method", ElementValue::String(mm.target_method.to_string()))
-            .element(
-                "at",
-                ElementValue::Array(vec![ElementValue::from(at_anno)]),
-            );
+            .element("at", ElementValue::Array(vec![ElementValue::from(at_anno)]));
         if mm.cancellable {
             inject_anno = inject_anno.element("cancellable", ElementValue::Boolean(true));
         }
@@ -341,11 +338,10 @@ fn build_native_payloads_class(mixins: &[&dyn MixinClass]) -> crustf::Result<Vec
     for m in mixins {
         for n in m.native_methods() {
             if seen.insert((n.name, n.descriptor)) {
-                builder = builder.method(
-                    MethodBuilder::new(n.name, n.descriptor).access_flags(
+                builder =
+                    builder.method(MethodBuilder::new(n.name, n.descriptor).access_flags(
                         AccessFlags::PUBLIC | AccessFlags::STATIC | AccessFlags::NATIVE,
-                    ),
-                );
+                    ));
             }
         }
     }
