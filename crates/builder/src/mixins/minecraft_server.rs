@@ -1,22 +1,41 @@
 use crustf::CodeBuilder;
 
-use super::{MixinAt, MixinClass, MixinMethod, NativeMethod};
+use super::{JavaType, MixinAt, MixinClass, MixinMethod};
 use crate::{NATIVE_LOADER_INTERNAL, NATIVE_PAYLOADS_OWNER};
 
 pub struct MinecraftServerMixin;
 
-const NATIVE_DESC: &str = "(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V";
-
-fn emit_call_native(owner: &dyn MixinClass, c: &mut CodeBuilder, native_fn: &str) {
-    c.max_stack(2);
+fn emit_call_native(
+    owner: &dyn MixinClass,
+    c: &mut CodeBuilder,
+    native_fn: &str,
+    target_args: &[JavaType],
+) {
     c.invokestatic(
         NATIVE_LOADER_INTERNAL,
         &format!("ensure_{}", owner.native_lib_name()),
         "()V",
-    )
-    .aload(1)
-    .invokestatic(NATIVE_PAYLOADS_OWNER, native_fn, NATIVE_DESC)
-    .return_void();
+    );
+
+    // slot 0 = this (instance handler なので除外)。
+    // slot 1 から対象メソッド引数を順に load し、その直後の slot に CallbackInfo。
+    let mut slot: u16 = 1;
+    for t in target_args {
+        t.emit_load(c, slot);
+        slot += t.slot_size();
+    }
+    c.aload(slot);
+
+    let mut desc = String::from("(");
+    for t in target_args {
+        desc.push_str(&t.descriptor());
+    }
+    desc.push_str("Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V");
+    c.invokestatic(NATIVE_PAYLOADS_OWNER, native_fn, &desc)
+        .return_void();
+
+    let stack_sum: u16 = target_args.iter().map(JavaType::slot_size).sum::<u16>() + 1;
+    c.max_stack(stack_sum.max(2));
 }
 
 impl MixinClass for MinecraftServerMixin {
@@ -29,50 +48,37 @@ impl MixinClass for MinecraftServerMixin {
     fn native_lib_name(&self) -> &'static str {
         "minecraft_server"
     }
-    fn native_methods(&self) -> &'static [NativeMethod] {
-        &[
-            NativeMethod {
-                name: "hello",
-                descriptor: NATIVE_DESC,
-            },
-            NativeMethod {
-                name: "goodbye",
-                descriptor: NATIVE_DESC,
-            },
-            NativeMethod {
-                name: "cancel_demo",
-                descriptor: NATIVE_DESC,
-            },
-        ]
-    }
     fn methods(&self) -> &'static [MixinMethod] {
         &[
             MixinMethod {
                 name: "onRun",
-                descriptor: "(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V",
                 target_method: "runServer",
+                target_args: &[],
                 at: MixinAt::Head,
                 cancellable: false,
                 exceptions: &["java/io/IOException"],
-                code: |owner, c| emit_call_native(owner, c, "hello"),
+                native_name: "hello",
+                code: |mm, owner, c| emit_call_native(owner, c, mm.native_name, mm.target_args),
             },
             MixinMethod {
                 name: "onRunReturn",
-                descriptor: "(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V",
                 target_method: "runServer",
+                target_args: &[],
                 at: MixinAt::Return,
                 cancellable: false,
                 exceptions: &["java/io/IOException"],
-                code: |owner, c| emit_call_native(owner, c, "goodbye"),
+                native_name: "goodbye",
+                code: |mm, owner, c| emit_call_native(owner, c, mm.native_name, mm.target_args),
             },
             MixinMethod {
                 name: "onRunCancel",
-                descriptor: "(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V",
                 target_method: "runServer",
+                target_args: &[],
                 at: MixinAt::Head,
                 cancellable: true,
                 exceptions: &["java/io/IOException"],
-                code: |owner, c| emit_call_native(owner, c, "cancel_demo"),
+                native_name: "cancel_demo",
+                code: |mm, owner, c| emit_call_native(owner, c, mm.native_name, mm.target_args),
             },
         ]
     }

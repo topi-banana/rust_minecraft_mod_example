@@ -304,14 +304,14 @@ fn build_mixin_class_for(m: &dyn MixinClass) -> crustf::Result<(String, Vec<u8>)
         if mm.cancellable {
             inject_anno = inject_anno.element("cancellable", ElementValue::Boolean(true));
         }
-        let mut mb = MethodBuilder::new(mm.name, mm.descriptor)
+        let mut mb = MethodBuilder::new(mm.name, mm.descriptor())
             .access_flags(AccessFlags::PRIVATE)
             .annotation(inject_anno);
         for ex in mm.exceptions {
             mb = mb.exception(*ex);
         }
         let code_fn = mm.code;
-        mb = mb.code(|c| code_fn(m, c));
+        mb = mb.code(|c| code_fn(mm, m, c));
         cb = cb.method(mb);
     }
     Ok((class_internal, cb.build()?))
@@ -334,10 +334,10 @@ fn build_native_payloads_class(mixins: &[&dyn MixinClass]) -> crustf::Result<Vec
                     .return_void();
             }),
     );
-    let mut seen: std::collections::BTreeSet<(&str, &str)> = std::collections::BTreeSet::new();
+    let mut seen: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
     for m in mixins {
         for n in m.native_methods() {
-            if seen.insert((n.name, n.descriptor)) {
+            if seen.insert((n.name.clone(), n.descriptor.clone())) {
                 builder =
                     builder.method(MethodBuilder::new(n.name, n.descriptor).access_flags(
                         AccessFlags::PUBLIC | AccessFlags::STATIC | AccessFlags::NATIVE,
