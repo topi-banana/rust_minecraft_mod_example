@@ -39,6 +39,10 @@ impl MixinClass for MinecraftServerMixin {
                 name: "goodbye",
                 descriptor: NATIVE_DESC,
             },
+            NativeMethod {
+                name: "cancel_demo",
+                descriptor: NATIVE_DESC,
+            },
         ]
     }
     fn methods(&self) -> &'static [MixinMethod] {
@@ -60,6 +64,15 @@ impl MixinClass for MinecraftServerMixin {
                 cancellable: false,
                 exceptions: &["java/io/IOException"],
                 code: |owner, c| emit_call_native(owner, c, "goodbye"),
+            },
+            MixinMethod {
+                name: "onRunCancel",
+                descriptor: "(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V",
+                target_method: "runServer",
+                at: MixinAt::Head,
+                cancellable: true,
+                exceptions: &["java/io/IOException"],
+                code: |owner, c| emit_call_native(owner, c, "cancel_demo"),
             },
         ]
     }
