@@ -23,7 +23,7 @@ object = { version = "0.36", default-features = false, features = [
   "read",
   "std",
 ] }
-jni = { version = "0.21", default-features = false }
+jni = { version = "0.22", default-features = false }
 cargo_metadata = "0.21"
 
 [profile.release]
