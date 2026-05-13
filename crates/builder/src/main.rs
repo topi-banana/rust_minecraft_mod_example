@@ -9,32 +9,29 @@ use crustf::{
     AccessFlags, Annotation, ClassFileBuilder, CodeBuilder, ElementValue, FieldBuilder, JarBuilder,
     MethodBuilder, Version,
 };
-use object::{Object, ObjectSection};
 use serde::Serialize;
 
-const MIXIN_PACKAGE: &str = "com.example.mixin";
-const MIXIN_PACKAGE_INTERNAL: &str = "com/example/mixin";
-const NATIVE_LOADER_INTERNAL: &str = "com/example/runtime/NativeLoader";
+mod mixins;
+use mixins::{MinecraftServerMixin, MixinClass};
+
+pub const MIXIN_PACKAGE: &str = "com.example.mixin";
+pub const MIXIN_PACKAGE_INTERNAL: &str = "com/example/mixin";
+pub const NATIVE_LOADER_INTERNAL: &str = "com/example/runtime/NativeLoader";
 // JNI 静的バインディングの対象 holder クラス。Mixin に native メソッドを
 // 置くと Mixin プロセッサがターゲットクラスにマージしてしまうため (結果
 // として `Java_net_minecraft_server_MinecraftServer_<fn>` を JVM が探して
 // UnsatisfiedLinkError)、 別の通常 Java クラスに集約する。inject-macro 側
 // `JNI_NATIVE_OWNER` ("com_example_runtime_NativePayloads") と必ず同期。
-const NATIVE_PAYLOADS_OWNER: &str = "com/example/runtime/NativePayloads";
+pub const NATIVE_PAYLOADS_OWNER: &str = "com/example/runtime/NativePayloads";
 const MOD_ID: &str = "hello-native-mod";
 const NATIVES_PACKAGE: &str = "native-payloads";
-// `System.mapLibraryName(NATIVE_LIB_BASENAME)` から実行時パスを組み立てる。
-// native-payloads の cdylib 名 (`name = "native-payloads"` → cargo は `-` を `_` に置換) と一致。
-const NATIVE_LIB_BASENAME: &str = "native_payloads";
 const NATIVE_LIB_DIRS_ENV: &str = "NATIVE_LIB_DIRS";
 
-const MIXIN_ANNOTATION: &str = "Lorg/spongepowered/asm/mixin/Mixin;";
-const INJECT_ANNOTATION: &str = "Lorg/spongepowered/asm/mixin/injection/Inject;";
-const AT_ANNOTATION: &str = "Lorg/spongepowered/asm/mixin/injection/At;";
+pub const MIXIN_ANNOTATION: &str = "Lorg/spongepowered/asm/mixin/Mixin;";
+pub const INJECT_ANNOTATION: &str = "Lorg/spongepowered/asm/mixin/injection/Inject;";
+pub const AT_ANNOTATION: &str = "Lorg/spongepowered/asm/mixin/injection/At;";
 
-// proc macro が OS 別 link_section に書く 3 つの section 名。Linux/macOS/Windows
-// それぞれ。同じバイナリには 1 つしか出ないが、ホストに依らず全部試す。
-const INJECT_META_SECTIONS: &[&str] = &[".inject_meta", "__injmeta", ".injmta"];
+const MIXINS: &[&dyn MixinClass] = &[&MinecraftServerMixin];
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,15 +63,6 @@ struct MixinInjectors {
     default_require: u32,
 }
 
-#[derive(Debug, Clone)]
-struct InjectMeta {
-    fn_name: String,
-    target: String,
-    method: String,
-    at: String,
-    class: String,
-}
-
 struct NativeLib {
     platform: String,
     lib_filename: String,
@@ -88,6 +76,13 @@ fn main() -> Result<()> {
     let ws_root: PathBuf = metadata.workspace_root.clone().into();
     let out_dir = ws_root.join("out");
 
+    let lib_names: Vec<&'static str> = {
+        let mut v: Vec<&'static str> = MIXINS.iter().map(|m| m.native_lib_name()).collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+
     let native_libs: Vec<NativeLib> = match env::var(NATIVE_LIB_DIRS_ENV) {
         Ok(env_value) => {
             println!("→ aggregate mode: {NATIVE_LIB_DIRS_ENV}={env_value}");
@@ -97,7 +92,7 @@ fn main() -> Result<()> {
             let host = host_platform_key();
             println!("→ local mode (host: {host})");
             run_cargo_build(&ws_root)?;
-            discover_native_libs(&metadata, &ws_root, &host)?
+            discover_native_libs(&ws_root, &host, &lib_names)?
         }
     };
     println!("→ {} native lib(s):", native_libs.len());
@@ -110,43 +105,26 @@ fn main() -> Result<()> {
         );
     }
 
-    let first = native_libs
-        .first()
-        .ok_or_else(|| anyhow!("no native libs collected"))?;
-    let metas = parse_inject_meta(&first.bytes, &first.lib_filename)?;
-    println!("→ {} inject record(s):", metas.len());
-    for m in &metas {
-        println!(
-            "    fn={} target={} method={} at={} class={}",
-            m.fn_name, m.target, m.method, m.at, m.class
-        );
-    }
-    if metas.is_empty() {
-        bail!("no #[inject] annotations found in {}", first.lib_filename);
-    }
-
     let mut class_files: Vec<(String, Vec<u8>)> = Vec::new();
     let mut all_class_simples: Vec<String> = Vec::new();
-    for meta in &metas {
-        let (internal, bytes) = build_mixin_class_for(meta)?;
-        let simple = internal
-            .rsplit('/')
-            .next()
-            .expect("class_internal contains /")
-            .to_string();
+    for m in MIXINS {
+        let (internal, bytes) = build_mixin_class_for(*m)?;
+        all_class_simples.push(m.mixin_class_simple_name().to_string());
         class_files.push((format!("{internal}.class"), bytes));
-        all_class_simples.push(simple);
     }
     println!("→ generated {} Mixin class(es)", class_files.len());
 
-    let loader_bytes = build_native_loader_class()?;
-    println!("→ generated NativeLoader ({} bytes)", loader_bytes.len());
-
-    let payloads_bytes = build_native_payloads_class(&metas)?;
+    let loader_bytes = build_native_loader_class(&lib_names)?;
     println!(
-        "→ generated NativePayloads holder ({} bytes, {} native method(s))",
-        payloads_bytes.len(),
-        metas.len()
+        "→ generated NativeLoader ({} bytes, {} lib(s))",
+        loader_bytes.len(),
+        lib_names.len()
+    );
+
+    let payloads_bytes = build_native_payloads_class(MIXINS)?;
+    println!(
+        "→ generated NativePayloads holder ({} bytes)",
+        payloads_bytes.len()
     );
 
     let fabric_json = serde_json::to_string_pretty(&fabric_mod_descriptor())?;
@@ -183,10 +161,10 @@ fn host_platform_key() -> String {
 }
 
 fn run_cargo_build(ws_root: &Path) -> Result<()> {
-    println!("→ cargo build -p {NATIVES_PACKAGE} --release");
+    println!("→ cargo build -p {NATIVES_PACKAGE} --release --examples");
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let status = Command::new(&cargo)
-        .args(["build", "-p", NATIVES_PACKAGE, "--release"])
+        .args(["build", "-p", NATIVES_PACKAGE, "--release", "--examples"])
         .current_dir(ws_root)
         .status()
         .context("failed to spawn cargo")?;
@@ -197,42 +175,29 @@ fn run_cargo_build(ws_root: &Path) -> Result<()> {
 }
 
 fn discover_native_libs(
-    metadata: &cargo_metadata::Metadata,
     ws_root: &Path,
     platform: &str,
+    lib_names: &[&str],
 ) -> Result<Vec<NativeLib>> {
-    use cargo_metadata::TargetKind;
-    let pkg = metadata
-        .workspace_packages()
-        .into_iter()
-        .find(|p| p.name.as_str() == NATIVES_PACKAGE)
-        .ok_or_else(|| anyhow!("`{NATIVES_PACKAGE}` package not found in workspace"))?;
-    let release_dir = ws_root.join("target/release");
+    let dir = ws_root.join("target/release/examples");
     let prefix = env::consts::DLL_PREFIX;
     let suffix = env::consts::DLL_SUFFIX;
     let mut out = Vec::new();
-    for t in &pkg.targets {
-        if t.kind.iter().any(|k| matches!(k, TargetKind::CDyLib)) {
-            // cargo は cdylib 出力名で `-` を `_` に置換する。
-            let stem = t.name.replace('-', "_");
-            let lib_filename = format!("{prefix}{stem}{suffix}");
-            let path = release_dir.join(&lib_filename);
-            if !path.exists() {
-                bail!(
-                    "expected {} after cargo build, but it does not exist",
-                    path.display()
-                );
-            }
-            let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-            out.push(NativeLib {
-                platform: platform.to_string(),
-                lib_filename,
-                bytes,
-            });
+    for name in lib_names {
+        let lib_filename = format!("{prefix}{name}{suffix}");
+        let path = dir.join(&lib_filename);
+        if !path.exists() {
+            bail!(
+                "expected {} after cargo build, but it does not exist",
+                path.display()
+            );
         }
-    }
-    if out.is_empty() {
-        bail!("no `[lib] crate-type = [\"cdylib\"]` target in `{NATIVES_PACKAGE}`");
+        let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        out.push(NativeLib {
+            platform: platform.to_string(),
+            lib_filename,
+            bytes,
+        });
     }
     Ok(out)
 }
@@ -285,53 +250,6 @@ fn looks_like_native_lib(name: &str) -> bool {
     name.ends_with(".so") || name.ends_with(".dll") || name.ends_with(".dylib")
 }
 
-fn parse_inject_meta(lib_bytes: &[u8], lib_filename: &str) -> Result<Vec<InjectMeta>> {
-    let obj = object::File::parse(lib_bytes)
-        .with_context(|| format!("parsing {lib_filename} as object file"))?;
-    let mut all_data: Vec<u8> = Vec::new();
-    for sec_name in INJECT_META_SECTIONS {
-        if let Some(sec) = obj.section_by_name(sec_name) {
-            let data = sec
-                .uncompressed_data()
-                .with_context(|| format!("reading section {sec_name}"))?;
-            all_data.extend_from_slice(&data);
-        }
-    }
-    if all_data.is_empty() {
-        bail!("no inject_meta section found in {lib_filename} (tried: {INJECT_META_SECTIONS:?})");
-    }
-    let mut records = Vec::new();
-    for rec in all_data.split(|&b| b == 0x1e) {
-        if rec.is_empty() {
-            continue;
-        }
-        let parts: Vec<&[u8]> = rec.split(|&b| b == 0x1f).collect();
-        if parts.len() != 5 {
-            bail!(
-                "malformed inject_meta record: expected 5 fields, got {}",
-                parts.len()
-            );
-        }
-        let field = |idx: usize, name: &str| -> Result<String> {
-            std::str::from_utf8(parts[idx])
-                .with_context(|| format!("inject_meta {name} not UTF-8"))
-                .map(str::to_string)
-        };
-        records.push(InjectMeta {
-            fn_name: field(0, "fn_name")?,
-            target: field(1, "target")?,
-            method: field(2, "method")?,
-            at: field(3, "at")?,
-            class: field(4, "class")?,
-        });
-    }
-    Ok(records)
-}
-
-fn class_internal_for(meta: &InjectMeta) -> String {
-    format!("{MIXIN_PACKAGE_INTERNAL}/{}", meta.class)
-}
-
 fn fabric_mod_descriptor() -> FabricMod {
     FabricMod {
         schema_version: 1,
@@ -359,13 +277,13 @@ fn mixin_config(class_simples: &[String]) -> MixinConfig {
     }
 }
 
-fn build_mixin_class_for(meta: &InjectMeta) -> crustf::Result<(String, Vec<u8>)> {
-    let class_internal = class_internal_for(meta);
-    let bytes = ClassFileBuilder::new(&class_internal)
+fn build_mixin_class_for(m: &dyn MixinClass) -> crustf::Result<(String, Vec<u8>)> {
+    let class_internal = format!("{MIXIN_PACKAGE_INTERNAL}/{}", m.mixin_class_simple_name());
+    let mut cb = ClassFileBuilder::new(&class_internal)
         .version(Version::new(52, 0))
         .annotation(Annotation::invisible(MIXIN_ANNOTATION).element(
             "value",
-            ElementValue::Array(vec![ElementValue::Class(meta.target.clone())]),
+            ElementValue::Array(vec![ElementValue::Class(m.target_class_descriptor())]),
         ))
         .method(
             MethodBuilder::new("<init>", "()V")
@@ -376,40 +294,29 @@ fn build_mixin_class_for(meta: &InjectMeta) -> crustf::Result<(String, Vec<u8>)>
                         .invokespecial("java/lang/Object", "<init>", "()V")
                         .return_void();
                 }),
-        )
-        .method(
-            MethodBuilder::new(
-                "onRun",
-                "(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V",
-            )
+        );
+    for mm in m.methods() {
+        let mut mb = MethodBuilder::new(mm.name, mm.descriptor)
             .access_flags(AccessFlags::PRIVATE)
-            .exception("java/io/IOException")
             .annotation(
                 Annotation::visible(INJECT_ANNOTATION)
-                    .element("method", ElementValue::String(meta.method.clone()))
+                    .element("method", ElementValue::String(mm.target_method.to_string()))
                     .element(
                         "at",
                         ElementValue::Array(vec![ElementValue::from(
                             Annotation::visible(AT_ANNOTATION)
-                                .element("value", ElementValue::String(meta.at.clone())),
+                                .element("value", ElementValue::String(mm.at.to_string())),
                         )]),
                     ),
-            )
-            .code(|c| emit_on_run(c, meta, &class_internal)),
-        )
-        .build()?;
-    Ok((class_internal, bytes))
-}
-
-fn emit_on_run(c: &mut CodeBuilder, meta: &InjectMeta, _class_internal: &str) {
-    c.max_stack(2);
-    c.invokestatic(NATIVE_LOADER_INTERNAL, "ensureLoaded", "()V")
-        .invokestatic(NATIVE_PAYLOADS_OWNER, &meta.fn_name, "()Ljava/lang/String;")
-        .astore(2)
-        .getstatic("java/lang/System", "out", "Ljava/io/PrintStream;")
-        .aload(2)
-        .invokevirtual("java/io/PrintStream", "println", "(Ljava/lang/String;)V")
-        .return_void();
+            );
+        for ex in mm.exceptions {
+            mb = mb.exception(*ex);
+        }
+        let code_fn = mm.code;
+        mb = mb.code(|c| code_fn(m, c));
+        cb = cb.method(mb);
+    }
+    Ok((class_internal, cb.build()?))
 }
 
 /// Holder class for all native methods. Mixin classes themselves cannot host
@@ -418,7 +325,7 @@ fn emit_on_run(c: &mut CodeBuilder, meta: &InjectMeta, _class_internal: &str) {
 /// `UnsatisfiedLinkError`). A plain class outside the `com.example.mixin`
 /// package is invisible to the Mixin processor, so symbols stay bound to
 /// `Java_com_example_runtime_NativePayloads_<fn>` as the JNI spec expects.
-fn build_native_payloads_class(metas: &[InjectMeta]) -> crustf::Result<Vec<u8>> {
+fn build_native_payloads_class(mixins: &[&dyn MixinClass]) -> crustf::Result<Vec<u8>> {
     let mut builder = ClassFileBuilder::new(NATIVE_PAYLOADS_OWNER).method(
         MethodBuilder::new("<init>", "()V")
             .access_flags(AccessFlags::PRIVATE)
@@ -429,23 +336,25 @@ fn build_native_payloads_class(metas: &[InjectMeta]) -> crustf::Result<Vec<u8>> 
                     .return_void();
             }),
     );
-    for meta in metas {
-        builder = builder.method(
-            MethodBuilder::new(&meta.fn_name, "()Ljava/lang/String;")
-                .access_flags(AccessFlags::PUBLIC | AccessFlags::STATIC | AccessFlags::NATIVE),
-        );
+    let mut seen: std::collections::BTreeSet<(&str, &str)> = std::collections::BTreeSet::new();
+    for m in mixins {
+        for n in m.native_methods() {
+            if seen.insert((n.name, n.descriptor)) {
+                builder = builder.method(
+                    MethodBuilder::new(n.name, n.descriptor).access_flags(
+                        AccessFlags::PUBLIC | AccessFlags::STATIC | AccessFlags::NATIVE,
+                    ),
+                );
+            }
+        }
     }
     builder.build()
 }
 
-fn build_native_loader_class() -> crustf::Result<Vec<u8>> {
+fn build_native_loader_class(lib_names: &[&str]) -> crustf::Result<Vec<u8>> {
     // 明示的に `.version` を呼ばない → crustf default の JAVA_5 (49) になり、
     // ifeq/ifne/goto を含む分岐コードでも StackMapTable を出力する必要がない。
-    ClassFileBuilder::new(NATIVE_LOADER_INTERNAL)
-        .field(
-            FieldBuilder::new("loaded", "Z")
-                .access_flags(AccessFlags::PRIVATE | AccessFlags::STATIC),
-        )
+    let mut b = ClassFileBuilder::new(NATIVE_LOADER_INTERNAL)
         .method(
             MethodBuilder::new("<init>", "()V")
                 .access_flags(AccessFlags::PRIVATE)
@@ -457,37 +366,50 @@ fn build_native_loader_class() -> crustf::Result<Vec<u8>> {
                 }),
         )
         .method(
-            MethodBuilder::new("resourcePath", "()Ljava/lang/String;")
+            MethodBuilder::new("resourcePath", "(Ljava/lang/String;)Ljava/lang/String;")
                 .access_flags(AccessFlags::PUBLIC | AccessFlags::STATIC)
                 .code(emit_resource_path),
-        )
-        .method(
-            MethodBuilder::new("ensureLoaded", "()V")
-                .access_flags(AccessFlags::PUBLIC | AccessFlags::STATIC | AccessFlags::SYNCHRONIZED)
-                .exception("java/io/IOException")
-                .code(emit_ensure_loaded),
-        )
-        .build()
+        );
+    for name in lib_names {
+        let flag = format!("loaded_{name}");
+        let ensure = format!("ensure_{name}");
+        let lib = name.to_string();
+        let flag_for_method = flag.clone();
+        b = b
+            .field(
+                FieldBuilder::new(&flag, "Z")
+                    .access_flags(AccessFlags::PRIVATE | AccessFlags::STATIC),
+            )
+            .method(
+                MethodBuilder::new(&ensure, "()V")
+                    .access_flags(
+                        AccessFlags::PUBLIC | AccessFlags::STATIC | AccessFlags::SYNCHRONIZED,
+                    )
+                    .exception("java/io/IOException")
+                    .code(move |c| emit_ensure_for_lib(c, &lib, &flag_for_method)),
+            );
+    }
+    b.build()
 }
 
 /// Bytecode for:
 /// ```java
-/// String osName = System.getProperty("os.name").toLowerCase();
-/// String raw    = System.getProperty("os.arch");
-/// // JVM の os.arch は Windows/Linux で "amd64"、Apple Silicon で "aarch64"、
-/// // 一部 JVM で "arm64" を返す。jar 内のパスは Rust 側の env::consts::ARCH
-/// // ("x86_64" / "aarch64") に統一しているので、ここで正規化する。
-/// String arch;
-/// if      ("amd64".equals(raw)) arch = "x86_64";
-/// else if ("arm64".equals(raw)) arch = "aarch64";
-/// else                          arch = raw;
-/// String os;
-/// if      (osName.startsWith("windows")) os = "windows";
-/// else if (osName.startsWith("mac"))     os = "macos";
-/// else                                   os = "linux";
-/// String libName = System.mapLibraryName("native_payloads");
-/// return "/native/" + os + "-" + arch + "/" + libName;
+/// static String resourcePath(String libBasename) {
+///     String osName = System.getProperty("os.name").toLowerCase();
+///     String raw    = System.getProperty("os.arch");
+///     String arch;
+///     if      ("amd64".equals(raw)) arch = "x86_64";
+///     else if ("arm64".equals(raw)) arch = "aarch64";
+///     else                          arch = raw;
+///     String os;
+///     if      (osName.startsWith("windows")) os = "windows";
+///     else if (osName.startsWith("mac"))     os = "macos";
+///     else                                   os = "linux";
+///     String libName = System.mapLibraryName(libBasename);
+///     return "/native/" + os + "-" + arch + "/" + libName;
+/// }
 /// ```
+/// local 0 = libBasename (引数), 1 = osName, 2 = arch, 3 = os, 4 = libName。
 fn emit_resource_path(c: &mut CodeBuilder) {
     let l_not_amd64 = c.label();
     let l_not_arm64 = c.label();
@@ -506,7 +428,7 @@ fn emit_resource_path(c: &mut CodeBuilder) {
             "(Ljava/lang/String;)Ljava/lang/String;",
         )
         .invokevirtual("java/lang/String", "toLowerCase", "()Ljava/lang/String;")
-        .astore(0);
+        .astore(1);
 
     // raw = System.getProperty("os.arch");
     c.ldc_string("os.arch").invokestatic(
@@ -520,10 +442,10 @@ fn emit_resource_path(c: &mut CodeBuilder) {
     c.dup()
         .ldc_string("amd64")
         .invokevirtual("java/lang/String", "equals", "(Ljava/lang/Object;)Z")
-        .ifeq(l_not_amd64) // stack: raw
+        .ifeq(l_not_amd64)
         .pop()
         .ldc_string("x86_64")
-        .astore(1)
+        .astore(2)
         .goto(l_arch_done);
 
     c.place(l_not_amd64);
@@ -531,52 +453,52 @@ fn emit_resource_path(c: &mut CodeBuilder) {
     c.dup()
         .ldc_string("arm64")
         .invokevirtual("java/lang/String", "equals", "(Ljava/lang/Object;)Z")
-        .ifeq(l_not_arm64) // stack: raw
+        .ifeq(l_not_arm64)
         .pop()
         .ldc_string("aarch64")
-        .astore(1)
+        .astore(2)
         .goto(l_arch_done);
 
     c.place(l_not_arm64);
     // stack: raw — else { arch = raw; }
-    c.astore(1);
+    c.astore(2);
 
     c.place(l_arch_done);
 
     // if (osName.startsWith("windows")) { os = "windows"; goto compose; }
-    c.aload(0)
+    c.aload(1)
         .ldc_string("windows")
         .invokevirtual("java/lang/String", "startsWith", "(Ljava/lang/String;)Z")
         .ifeq(l_not_win)
         .ldc_string("windows")
-        .astore(2)
+        .astore(3)
         .goto(l_compose);
 
     c.place(l_not_win);
     // else if (osName.startsWith("mac")) { os = "macos"; goto compose; }
-    c.aload(0)
+    c.aload(1)
         .ldc_string("mac")
         .invokevirtual("java/lang/String", "startsWith", "(Ljava/lang/String;)Z")
         .ifeq(l_not_mac)
         .ldc_string("macos")
-        .astore(2)
+        .astore(3)
         .goto(l_compose);
 
     c.place(l_not_mac);
-    c.ldc_string("linux").astore(2);
+    c.ldc_string("linux").astore(3);
 
     c.place(l_compose);
 
-    // libName = System.mapLibraryName("native_payloads");
-    c.ldc_string(NATIVE_LIB_BASENAME)
+    // libName = System.mapLibraryName(libBasename);
+    c.aload(0)
         .invokestatic(
             "java/lang/System",
             "mapLibraryName",
             "(Ljava/lang/String;)Ljava/lang/String;",
         )
-        .astore(3);
+        .astore(4);
 
-    // return "/native/" + os + "-" + osArch + "/" + libName;
+    // return "/native/" + os + "-" + arch + "/" + libName;
     c.new_class("java/lang/StringBuilder")
         .dup()
         .invokespecial("java/lang/StringBuilder", "<init>", "()V")
@@ -586,7 +508,7 @@ fn emit_resource_path(c: &mut CodeBuilder) {
             "append",
             "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
         )
-        .aload(2)
+        .aload(3)
         .invokevirtual(
             "java/lang/StringBuilder",
             "append",
@@ -598,7 +520,7 @@ fn emit_resource_path(c: &mut CodeBuilder) {
             "append",
             "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
         )
-        .aload(1)
+        .aload(2)
         .invokevirtual(
             "java/lang/StringBuilder",
             "append",
@@ -610,7 +532,7 @@ fn emit_resource_path(c: &mut CodeBuilder) {
             "append",
             "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
         )
-        .aload(3)
+        .aload(4)
         .invokevirtual(
             "java/lang/StringBuilder",
             "append",
@@ -626,42 +548,43 @@ fn emit_resource_path(c: &mut CodeBuilder) {
 
 /// Bytecode for:
 /// ```java
-/// public static synchronized void ensureLoaded() throws IOException {
-///     if (loaded) return;
-///     String path = resourcePath();
-///     File tmp = File.createTempFile("native_payloads_",
-///                                    "_" + System.mapLibraryName("native_payloads"));
+/// public static synchronized void ensure_<lib>() throws IOException {
+///     if (loaded_<lib>) return;
+///     String path = resourcePath("<lib>");
+///     File tmp = File.createTempFile("<lib>_", "_" + System.mapLibraryName("<lib>"));
 ///     tmp.deleteOnExit();
 ///     InputStream is = NativeLoader.class.getResourceAsStream(path);
 ///     if (is == null) throw new IOException("native lib not found: " + path);
 ///     Files.copy(is, tmp.toPath(), StandardCopyOption.REPLACE_EXISTING);
 ///     is.close();
 ///     System.load(tmp.getAbsolutePath());
-///     loaded = true;
+///     loaded_<lib> = true;
 /// }
 /// ```
-fn emit_ensure_loaded(c: &mut CodeBuilder) {
+fn emit_ensure_for_lib(c: &mut CodeBuilder, lib_name: &str, flag_name: &str) {
     let l_not_loaded = c.label();
     let l_is_ok = c.label();
 
     c.max_stack(8);
 
-    // if (loaded) return;
-    c.getstatic(NATIVE_LOADER_INTERNAL, "loaded", "Z")
+    // if (loaded_<lib>) return;
+    c.getstatic(NATIVE_LOADER_INTERNAL, flag_name, "Z")
         .ifeq(l_not_loaded)
         .return_void();
     c.place(l_not_loaded);
 
-    // String path = resourcePath();
-    c.invokestatic(
-        NATIVE_LOADER_INTERNAL,
-        "resourcePath",
-        "()Ljava/lang/String;",
-    )
-    .astore(0);
+    // String path = resourcePath("<lib>");
+    c.ldc_string(lib_name)
+        .invokestatic(
+            NATIVE_LOADER_INTERNAL,
+            "resourcePath",
+            "(Ljava/lang/String;)Ljava/lang/String;",
+        )
+        .astore(0);
 
-    // File tmp = File.createTempFile("native_payloads_", "_" + System.mapLibraryName("native_payloads"));
-    c.ldc_string("native_payloads_")
+    // File tmp = File.createTempFile("<lib>_", "_" + System.mapLibraryName("<lib>"));
+    let temp_prefix = format!("{lib_name}_");
+    c.ldc_string(&temp_prefix)
         .new_class("java/lang/StringBuilder")
         .dup()
         .invokespecial("java/lang/StringBuilder", "<init>", "()V")
@@ -671,7 +594,7 @@ fn emit_ensure_loaded(c: &mut CodeBuilder) {
             "append",
             "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
         )
-        .ldc_string(NATIVE_LIB_BASENAME)
+        .ldc_string(lib_name)
         .invokestatic(
             "java/lang/System",
             "mapLibraryName",
@@ -766,8 +689,8 @@ fn emit_ensure_loaded(c: &mut CodeBuilder) {
         .invokevirtual("java/io/File", "getAbsolutePath", "()Ljava/lang/String;")
         .invokestatic("java/lang/System", "load", "(Ljava/lang/String;)V");
 
-    // loaded = true;
+    // loaded_<lib> = true;
     c.iconst_1()
-        .putstatic(NATIVE_LOADER_INTERNAL, "loaded", "Z")
+        .putstatic(NATIVE_LOADER_INTERNAL, flag_name, "Z")
         .return_void();
 }
