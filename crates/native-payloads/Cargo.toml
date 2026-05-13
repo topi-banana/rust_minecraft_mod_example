@@ -4,7 +4,12 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 
-[lib]
+autolib = false
+autoexamples = false
+
+[[example]]
+name = "minecraft_server"
+path = "examples/minecraft_server.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
